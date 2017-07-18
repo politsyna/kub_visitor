@@ -1,0 +1,6 @@
+name: node_visitor
+description: 'node_visitor'
+type: module
+core: 8.x
+version: 1.1
+package: Synapse
