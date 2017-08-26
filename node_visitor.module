@@ -13,6 +13,7 @@ use Drupal\Core\Ajax\HtmlCommand;
 use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\Datetime\Entity\DateFormat;
 use Drupal\node\Entity\Node;
+use Drupal\node_visitor\Controller\ConditionalFields;
 
 /**
  * Node_visitor_entity_presave.
@@ -32,24 +33,52 @@ function node_visitor_entity_presave(EntityInterface $node) {
 }
 
 /**
+ * Функциями getХххх() формируем из ноды объекты.
+ */
+function _node_visitor_getkassa($visitor) {
+  $query = \Drupal::entityQuery('node');
+  $query->condition('status', 1);
+  $query->condition('type', 'kassa');
+  $query->condition('field_kassa_ref_visitor', $visitor->id());
+  $entity_ids = $query->execute();
+  $kassa_array = Node::loadMultiple($entity_ids);
+  return $kassa_array;
+}
+
+/**
  * Node_visitor_entity_view.
  */
 function node_visitor_entity_view(array &$build, EntityInterface $entity, EntityViewDisplayInterface $display, $view_mode) {
   if (method_exists($entity, 'getType') && $entity->getType() == 'visitor') {
     if ($view_mode != 'teaser') {
+      $node_activity = $entity->field_visitor_ref_activity->entity;
+      $kassa_array = _node_visitor_getkassa($entity);
+      $summa = 0;
+      foreach ($kassa_array as $key => $node) {
+        $summa_2 = $node->field_kassa_summa->value;
+        $summa = $summa + $summa_2;
+      }
       $date = strtotime($entity->field_visitor_date->value);
       $date = format_date($date, 'custom', 'D');
-      $predoplata = $entity->field_visitor_predoplata->value;
       $skidka = $entity->field_visitor_skidka->value;
+      $kolvo_people = $entity->field_visitor_people->value;
+      $group_activ = $node_activity->field_activity_group->entity->name->value;
       $field = 'field_activity_cost';
       $field_dop = 'field_dopactivity_cost';
       if (in_array($date, ["сб", "вс"])) {
         $field = 'field_activity_cost_holiday';
         $field_dop = 'field_dopactivity_cost_holiday';
       }
-      $count = $entity->field_visitor_ref_activity->entity->get($field)->value;
-      if (empty($count)) {
-        $count = $entity->field_visitor_ref_activity->entity->field_activity_cost->value;
+      $count_act = $entity->field_visitor_ref_activity->entity->get($field)->value;
+      if (empty($count_act)) {
+        $count_act = $entity->field_visitor_ref_activity->entity->field_activity_cost->value;
+      }
+      if ($group_activ == "Батут" || $group_activ == "Скалодром" || $group_activ == "Комплексы"
+      || $group_activ == "Секции" || $group_activ == "Корпоративы") {
+        $count = $count_act * $kolvo_people;
+      }
+      else {
+        $count = $count_act;
       }
       $count_dop = 0;
       foreach ($entity->field_visitor_ref_dopactivity as $key => $value) {
@@ -58,23 +87,27 @@ function node_visitor_entity_view(array &$build, EntityInterface $entity, Entity
       }
       $entity->field_visitor_cost_raschet->setValue($count);
       $soskidkami = $count + $count_dop - $count * $skidka / 100;
+      $soskidkami = round($soskidkami, 1);
       $entity->field_visitor_cost_disc->setValue($soskidkami);
-      $koplate = $soskidkami - $predoplata;
-      $entity->field_visitor_cost_k_oplate->setValue($koplate);
-      $build['visitor_cost'] = [
-        '#markup' => '<span class="cost">Стоимость услуги: </span>' . number_format($count, 0, ",", " ") . ' руб.<br>',
+      $entity->field_visitor_cost->setValue($summa);
+      $oplacheno = $summa;
+      $ostatok_k_oplate = $soskidkami - $oplacheno;
+      $entity->field_visitor_cost_k_oplate->setValue($ostatok_k_oplate);
+      $build['visitor_cost_raschet'] = [
+        '#markup' => '<span class="cost">Стоимость услуги: </span>' . number_format($count, 1, ".", " ") . ' руб.<br>',
       ];
       $build['visitor_cost_disc'] = [
-        '#markup' => '<span class="cost">Стоимость услуги с учетом скидок и доп. услуг: </span>' . number_format($soskidkami, 0, ",", " ") . ' руб.<br>',
+        '#markup' => '<span class="cost">Стоимость услуги с учетом скидок и доп. услуг: </span>' . number_format($soskidkami, 1, ".", " ") . ' руб.<br>',
       ];
-      $build['visitor_k_oplate'] = [
-        '#markup' => '<span class="cost">К оплате (с учетом предоплаты): </span>' . number_format($koplate, 0, ",", " ") . ' руб.<br>',
+      $build['visitor_cost'] = [
+        '#markup' => '<span class="cost">Оплачено: </span>' . number_format($oplacheno, 1, ".", " ") . ' руб.<br>',
       ];
-      $status = $entity->field_visitor_status->value;
-      if ($status == 'zayvka' || $status == 'done') {
-        $build['cost'] = \Drupal::formBuilder()->getForm('Drupal\node_visitor\Form\CalcCost', $entity);
-      }
-      $build['status'] = \Drupal::formBuilder()->getForm('Drupal\node_visitor\Form\StatusChange', $entity);
+      $build['visitor_ostatok'] = [
+        '#markup' => '<span class="cost">Осталось оплатить: </span>' . number_format($ostatok_k_oplate, 1, ".", " ") . ' руб.<br>',
+      ];
+      //$status = $entity->field_visitor_status->value;
+      $build['cost'] = \Drupal::formBuilder()->getForm('Drupal\node_visitor\Form\CalcCost', $entity);
+      //$build['status'] = \Drupal::formBuilder()->getForm('Drupal\node_visitor\Form\StatusChange', $entity);
       $entity->save(TRUE);
     }
   }
@@ -83,27 +116,45 @@ function node_visitor_entity_view(array &$build, EntityInterface $entity, Entity
 /**
  * F ajaxModeDev.
  */
-function node_visitor_ajax(&$form, $form_state) {
+function node_visitor_ajax(&$form, FormStateInterface $form_state, $form_id) {
   $response = new AjaxResponse();
   $visitor_ref_activity = $form_state->getValue('field_visitor_ref_activity');
   $visitor_date = $form_state->getValue('field_visitor_date');
   $date = $visitor_date[0]['value']['date'];
-  $start = strtotime($date);
-  $end = strtotime($date) + 24 * 3600;
-  $otvet = 'Заказанные услуги на ' . format_date($start, 'custom', 'd-m-Y') . ":";
-  $query = \Drupal::entityQuery('node');
-  $query->condition('status', 1);
-  $query->condition('type', 'visitor');
-  $query->condition('field_visitor_date', format_date($start, 'custom', 'Y-m-d'), '>');
-  $query->condition('field_visitor_date', format_date($end, 'custom', 'Y-m-d'), '<');
-  $query->sort('field_visitor_date');
-  $query->range(0, 30);
-  $entity_ids = $query->execute();
-  $visitor = Node::loadMultiple($entity_ids);
-  foreach ($visitor as $key => $node) {
-    $otvet .= "<br><a href='/node/$key'>{$node->title->value}</a>";
+  $visitor_ref_activity_id = $visitor_ref_activity[0]['target_id'];
+  $visitor_ref_activity = Node::load($visitor_ref_activity_id);
+  $activity_cost = $visitor_ref_activity->field_activity_cost->value;
+  $date2 = strtotime($date);
+  $date2 = format_date($date2, 'custom', 'D');
+  if (in_array($date2, ["сб", "вс"])) {
+    $tru_cost = $visitor_ref_activity->field_activity_cost_holiday->value;
+    if ($tru_cost > 0) {
+      $activity_cost = $tru_cost;
+    }
   }
-  $response->addCommand(new HtmlCommand("#check-date", $otvet));
+  if (strtotime($date) > 100) {
+    $start = strtotime($date);
+    $end = strtotime($date) + 24 * 3600;
+    $otvet = 'Заказанные услуги на ' . format_date($start, 'custom', 'd-m-Y') . ":";
+    $otvet2 = 'Цена услуги: ' . number_format($activity_cost, 0, ",", " ") . ' руб.<br>';
+    $query = \Drupal::entityQuery('node');
+    $query->condition('status', 1);
+    $query->condition('type', 'visitor');
+    $query->condition('field_visitor_date', format_date($start, 'custom', 'Y-m-d'), '>');
+    $query->condition('field_visitor_date', format_date($end, 'custom', 'Y-m-d'), '<');
+    $query->sort('field_visitor_date');
+    $query->range(0, 30);
+    $entity_ids = $query->execute();
+    $visitor = Node::loadMultiple($entity_ids);
+    foreach ($visitor as $key => $node) {
+      $otvet .= "<br><a href='/node/$key'>{$node->title->value}</a>";
+    }
+  }
+  else {
+    $otvet = "Не указана дата.";
+  }
+
+  $response->addCommand(new HtmlCommand("#check-date", $otvet2));
   return $response;
 }
 
@@ -112,13 +163,15 @@ function node_visitor_ajax(&$form, $form_state) {
  */
 function node_visitor_form_alter(&$form, FormStateInterface $form_state, $form_id) {
   if ($form_id == 'node_visitor_form' || $form_id == 'node_visitor_edit_form') {
-    dsm($form['field_visitor_ref_activity']['widget']);
+    ConditionalFields::init($form, $form_state);
+    //dsm($form['field_visitor_ref_activity']['widget']);
     $form['field_visitor_ref_activity']['widget']['#ajax'] = [
       'callback' => 'node_visitor_ajax',
       'effect' => 'fade',
       'progress' => ['type' => 'throbber', 'message' => ""],
       'event' => 'change',
     ];
+    //dsm($form['field_visitor_ref_activity']['widget']);
     $format = DateFormat::load('html_time')->getPattern();
     $form['field_visitor_ref_activity']["#suffix"] = '<div id="check-date"></div>';
     $form['field_visitor_date']['widget']['0']['value']['#date_increment'] = ':15';

@@ -8,6 +8,7 @@ use Drupal\Core\Ajax\AjaxResponse;
 use Drupal\Core\Ajax\RedirectCommand;
 use Drupal\Core\Ajax\CssCommand;
 use Drupal\Core\Ajax\HtmlCommand;
+use Drupal\node\Entity\Node;
 
 /**
  * SimpleForm.
@@ -19,21 +20,48 @@ class CalcCost extends FormBase {
    */
   public function ajaxCost(array &$form, &$form_state) {
     $response = new AjaxResponse();
+    $oplacheno = $form_state->getValue('money');
+    if (!is_numeric($oplacheno) || $oplacheno <= 0) {
+      $response->addCommand(new HtmlCommand('#button-cost-form', '<br>Введена некорректная сумма'));
+      // Выйти из функции, если ошибка (введена некорректная сумма).
+      return $response;
+    }
     $node = $form_state->node_visitor;
-    $fakt_cost = $node->field_visitor_cost->value;
-    $rasch_cost = $node->field_visitor_cost_raschet->value;
-    $fakt = $form_state->getValue('fakt');
-    $node->field_visitor_cost->setValue($fakt);
-    $status = $node->field_visitor_status->value;
-    $status_done = "done";
-    if ($status == "zayvka") {
-      $node->field_visitor_status->setValue($status_done);
+    $config = \Drupal::config('node_kassa.settings');
+    $config2 = \Drupal::service('config.factory')->getEditable('node_kassa.settings');
+    $number = $form_state->getValue('number');
+    $forma_oplati = $form_state->getValue('select');
+    $nid = $node->id();
+    if (strlen($number) < 3) {
+      $number = $config->get('number');
+    }
+    $seria = $config->get('seria');
+    $node_kassa = Node::create([
+      'type' => 'kassa',
+      'title' => 'Title',
+      'field_kassa_seria' => $seria,
+      'field_kassa_number' => $number,
+      'field_kassa_summa' => $oplacheno,
+      'field_kassa_ref_visitor' => $nid,
+      'field_kassa_forma' => $forma_oplati,
+    ]);
+    $node_kassa->save();
+    $node_kassa_id = $node_kassa->id();
+    if ($node_kassa_id) {
+      $number++;
+      $number = str_pad($number, 5, "0", STR_PAD_LEFT);
+      $config2->set('number', $number)->save();
+      $oplacheno = $node->field_visitor_cost->value;
+      $rasch_cost = $node->field_visitor_cost_raschet->value;
+      $node->field_visitor_cost->setValue($oplacheno);
+      $node->field_visitor_cost_k_oplate->setValue($k_oplate);
       $node->save();
-      $response->addCommand(new HtmlCommand("#status-change", "Статус заявки успешно изменен"));
+      $response->addCommand(new RedirectCommand('/node/' . $node->id()));
+    }
+    else {
+      $response->addCommand(new HtmlCommand('#button-cost-form', '<br>dbxbcbма'));
     }
 
-    $response->addCommand(new RedirectCommand('/node/' . $node->id()));
-    $node->save();
     return $response;
   }
 
@@ -42,17 +70,34 @@ class CalcCost extends FormBase {
    */
   public function buildForm(array $form, FormStateInterface $form_state, $extra = NULL) {
     $node = $extra;
-    $fakt_cost = $node->field_visitor_cost->value;
-    $k_oplate = $node->field_visitor_cost_k_oplate->value;
+    $oplacheno = $node->field_visitor_cost->value;
+    $ostatok_k_oplate = $node->field_visitor_cost_k_oplate->value;
     $form_state->node_visitor = $node;
     $form_state->setCached(FALSE);
-
-    if ($fakt_cost == 0) {
-      $form['fakt'] = [
+    $config = \Drupal::config('node_kassa.settings');
+    if ($ostatok_k_oplate > 0) {
+      $form['money'] = [
         '#type' => 'textfield',
-        '#title' => '<span class="cost">Внесено: </span>',
-        "#default_value" => number_format($k_oplate, 0, ",", " "),
+        '#title' => '<span class="cost">Внесено в кассу: </span>',
+        "#default_value" => number_format($ostatok_k_oplate, 1, ".", ""),
       ];
+      $form['number'] = [
+        '#type' => 'textfield',
+        '#title' => '<span class="cost">Номер билета: </span>',
+        "#default_value" => $config->get('number'),
+        "#placeholder" => $config->get('number'),
+      ];
+      $form['select'] = [
+        '#type' => 'select',
+        '#title' => 'Форма оплаты',
+        '#options' => [
+          'cash' => 'наличные',
+          'card' => 'банковская карта',
+          'beznal' => 'безналичный расчет',
+        ],
+        '#default_value' => 1,
+      ];
+
       $form['actions'] = [
         '#type' => 'actions',
       ];
@@ -69,9 +114,9 @@ class CalcCost extends FormBase {
       ];
     }
     else {
-      $form['#prefix'] = '<br><span class="cost">Внесено: </span>'
-      . number_format($k_oplate, 0, ",", " ") . " руб.";
+      $form['#prefix'] = '<br><span class="cost">Все оплачено! </span>';
     }
+
     return $form;
   }
 
